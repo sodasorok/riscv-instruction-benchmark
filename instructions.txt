@@ -1,0 +1,133 @@
+# Формат: NAME | EXPR_LAT | EXPR_THR | SETUP | VL | LMUL | ESIZE | VTYPE(необяз.)
+#
+#
+#
+# про vle*/vse16.v/vlseg2e16.v/vsseg2e16.v: буфер статический и
+# никогда не меняется, а ITERATIONS известен на этапе компиляции —
+# поэтому GCC на -O2 способен ЦЕЛИКОМ свернуть цикл в константу (не
+# просто вынести обращение за цикл, а вычислить финальный результат
+# аналитически, раз всё предсказуемо).
+# Первая попытка (индекс через volatile-счётчик voff++) свернуть цикл
+# не давала, но сам round-trip volatile-скаляра (чтение+инкремент+запись
+# в память при каждом вызове) стоил ~10 тактов и забивал измеряемую
+# инструкцию собственным шумом (все vle8/16/32 давали одинаковые ~10
+# тактов независимо от ширины элемента — явный признак, что меряется
+# не то). Поэтому вместо voff используется compiler barrier
+# `asm volatile("" ::: "memory")` перед каждым обращением — он НЕ
+# генерирует ни одной инструкции (просто запрещает компилятору
+# переупорядочивать/сворачивать обращения к памяти через эту точку),
+# то есть не добавляет собственных тактов, но не даёт GCC доказать,
+# что 10 млн одинаковых загрузок/записей эквивалентны одной.
+#
+# про vle*/vlseg2e16.v: адрес не меняется между итерациями,
+# поэтому "Latency" для них — это НЕ настоящая latency load-to-use
+# (нет истинной RAW-зависимости через адрес), а скорее back-to-back
+# issue rate одного и того же адреса (вероятно, попадёт в L1). Честная
+# latency загрузки — это отдельный тест "pointer chasing"
+
+vle8.v_e8m1 | /*v_res*/ ({ asm volatile("" ::: "memory"); __riscv_vle8_v_u8m1(pbuf, vl); }) | /*vN*/ ({ asm volatile("" ::: "memory"); __riscv_vle8_v_u8m1(pbuf, vl); }) | static uint8_t buf8[128] = {1,2,3,4}; static const uint8_t *pbuf = buf8; | 32 | m1 | 8 | vuint8m1_t
+
+vle16.v_e16m1 | /*v_res*/ ({ asm volatile("" ::: "memory"); __riscv_vle16_v_i16m1(pbuf, vl); }) | /*vN*/ ({ asm volatile("" ::: "memory"); __riscv_vle16_v_i16m1(pbuf, vl); }) | static int16_t buf16[64] = {1,2,3,4}; static const int16_t *pbuf = buf16; | 32 | m1 | 16 |
+
+vle32.v_e32m1 | /*v_res*/ ({ asm volatile("" ::: "memory"); __riscv_vle32_v_i32m1(pbuf, vl); }) | /*vN*/ ({ asm volatile("" ::: "memory"); __riscv_vle32_v_i32m1(pbuf, vl); }) | static int32_t buf32[64] = {1,2,3,4}; static const int32_t *pbuf = buf32; | 32 | m1 | 32 |
+
+vse16.v_e16m1 |  v_res; __riscv_vse16_v_i16m1(pbuf, v_res, vl); |  vN; __riscv_vse16_v_i16m1(pbuf, vN, vl); | static int16_t buf16_out[64]; static int16_t *pbuf = buf16_out; | 32 | m1 | 16 |
+
+vlseg2e16.v_e16m1 | /*v_res*/ ({ asm volatile("" ::: "memory"); __riscv_vget_v_i16m1x2_i16m1(__riscv_vlseg2e16_v_i16m1x2(pbuf, vl), 0); }) | /*vN*/ ({ asm volatile("" ::: "memory"); __riscv_vget_v_i16m1x2_i16m1(__riscv_vlseg2e16_v_i16m1x2(pbuf, vl), 0); }) | static int16_t buf16seg_in[128] = {1,2,3,4,5,6,7,8}; static const int16_t *pbuf = buf16seg_in; | 32 | m1 | 16 |
+
+vsseg2e16.v_e16m1 | ({ asm volatile("" ::: "memory"); __riscv_vsseg2e16_v_i16m1x2(pbuf, __riscv_vcreate_v_i16m1x2(v_res, v_res), vl); v_res; }) | ({ asm volatile("" ::: "memory"); __riscv_vsseg2e16_v_i16m1x2(pbuf, __riscv_vcreate_v_i16m1x2(vN, vN), vl); vN; }) | static int16_t buf16seg_out[128]; static int16_t *pbuf = buf16seg_out; | 32 | m1 | 16 |
+
+vsseg3e32.v_e32m1 | ({ asm volatile("" ::: "memory"); __riscv_vsseg3e32_v_i32m1x3(pbuf, __riscv_vcreate_v_i32m1x3(v_res, v_res, v_res), vl); v_res; }) | ({ asm volatile("" ::: "memory"); __riscv_vsseg3e32_v_i32m1x3(pbuf, __riscv_vcreate_v_i32m1x3(vN, vN, vN), vl); vN; }) | static int32_t buf32seg_out[128]; static int32_t *pbuf = buf32seg_out; | 32 | m1 | 32 |
+
+vrgather.vv_e8m1  | __riscv_vrgather_vv_i8m1(v_res, __riscv_vreinterpret_v_i8m1_u8m1(vind), vl)   | __riscv_vrgather_vv_i8m1(vN, __riscv_vreinterpret_v_i8m1_u8m1(vind), vl)   | int8_t buf[] = {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14}; vint8m1_t vind = __riscv_vle8_v_i8m1((const int8_t*)buf, vl); | 1024 | m1 | 8  |
+vrgather.vv_e16m1 | __riscv_vrgather_vv_i16m1(v_res, __riscv_vreinterpret_v_i16m1_u16m1(v_step), vl) | __riscv_vrgather_vv_i16m1(vN, __riscv_vreinterpret_v_i16m1_u16m1(v_step), vl) | int16_t buf[] = {0,0,2,2,4,4,6,6,8,8,10,10,12,12,14,14}; vint16m1_t vind = __riscv_vle16_v_i16m1((const int16_t*)buf, vl); | 1024 | m1 | 16 |
+
+
+vsmul.vv_e16m1 | __riscv_vsmul_vv_i16m1(v_res, v_step, 0, vl)  | __riscv_vsmul_vv_i16m1(vN, v_step, 0, vl)  |                                                    | 1024 | m1 | 16 |
+
+vsadd.vv_e16m1 | __riscv_vsadd_vv_i16m1(v_res, v_step, vl)     | __riscv_vsadd_vv_i16m1(vN, v_step, vl)     |                                                    | 1024 | m1 | 16 |
+
+vssub.vv_e16m1 | __riscv_vssub_vv_i16m1(v_res, v_step, vl)     | __riscv_vssub_vv_i16m1(vN, v_step, vl)     |                                                    | 1024 | m1 | 16 |
+
+vmul.vx_e32mf2  | __riscv_vmul_vx_i32mf2(v_res, 3, vl)          | __riscv_vmul_vx_i32mf2(vN, 3, vl)          |                                                    | 1024 | mf2 | 32 |
+
+vrsub.vi_e16mf4 | __riscv_vrsub_vx_i16mf4(v_res, 1, vl)         | __riscv_vrsub_vx_i16mf4(vN, 1, vl)         |                                                    | 1024 | mf4 | 16 |
+
+vsra.vi_e32mf2  | __riscv_vsra_vx_i32mf2(v_res, 15, vl)         | __riscv_vsra_vx_i32mf2(vN, 15, vl)         |                                                    | 1024 | mf2 | 32 |
+
+vsub.vv_e32mf2  | __riscv_vsub_vv_i32mf2(v_res, v_step, vl)     | __riscv_vsub_vv_i32mf2(vN, v_step, vl)     |                                                    | 1024 | mf2 | 32 |
+
+vadd.vv_e32mf2  | __riscv_vadd_vv_i32mf2(v_res, v_step, vl)     | __riscv_vadd_vv_i32mf2(vN, v_step, vl)     |                                                    | 1024 | mf2 | 32 |
+
+vsub.vv_e32m4  | __riscv_vsub_vv_i32m4(v_res, v_step, vl)       | __riscv_vsub_vv_i32m4(vN, v_step, vl)       |                                                    | 1024 | m4 | 32 |
+
+vadd.vv_e32m4  | __riscv_vadd_vv_i32m4(v_res, v_step, vl)       | __riscv_vadd_vv_i32m4(vN, v_step, vl)       |                                                    | 1024 | m4 | 32 |
+
+vssra.vi_e32m4 | __riscv_vssra_vx_i32m4(v_res, 15, 0, vl)       | __riscv_vssra_vx_i32m4(vN, 15, 0, vl)       |                                                    | 1024 | m4 | 32 |
+
+vsadd.vv_e32m4 | __riscv_vsadd_vv_i32m4(v_res, v_step, vl)      | __riscv_vsadd_vv_i32m4(vN, v_step, vl)      |                                                    | 1024 | m4 | 32 |
+
+vslide1down.vx_e32mf2 | __riscv_vslide1down_vx_i32mf2(v_res, 1, vl) | __riscv_vslide1down_vx_i32mf2(vN, 1, vl) |                                                    | 1024 | mf2 | 32 |
+vslide1down.vx_e16m1 | __riscv_vslide1down_vx_i16m1(v_res, 1, vl) | __riscv_vslide1down_vx_i16m1(vN, 1, vl) |                                                    | 1024 | m1 | 16 |
+
+vadd.vx_e32mf2 | __riscv_vadd_vx_i32mf2(v_res, 5, vl)           | __riscv_vadd_vx_i32mf2(vN, 5, vl)           |                                                    | 1024 | mf2 | 32 |
+
+vmul.vv_e32m4  | __riscv_vmul_vv_i32m4(v_res, v_step, vl)       | __riscv_vmul_vv_i32m4(vN, v_step, vl)       |                                                    | 1024 | m4 | 32 |
+
+vmacc.vv_e32m4 | __riscv_vmacc_vv_i32m4(v_res, v_step, v_extra, vl) | __riscv_vmacc_vv_i32m4(vN, v_step, v_extra, vl) | vint32m4_t v_extra = __riscv_vmv_v_x_i32m4(3, vl) | 1024 | m4 | 32 |
+
+vxor.vx_e32m4  | __riscv_vxor_vx_i32m4(v_res, 0xFF, vl)         | __riscv_vxor_vx_i32m4(vN, 0xFF, vl)         |                                                    | 1024 | m4 | 32 |
+
+vrsub.vx_e32m4 | __riscv_vrsub_vx_i32m4(v_res, 100, vl)         | __riscv_vrsub_vx_i32m4(vN, 100, vl)         |                                                    | 1024 | m4 | 32 |
+
+vmul.vx_e32m2  | __riscv_vmul_vx_i32m2(v_res, 3, vl)            | __riscv_vmul_vx_i32m2(vN, 3, vl)            |                                                    | 1024 | m2 | 32 |
+
+vnmsac.vx_e32m2 | __riscv_vnmsac_vx_i32m2(v_res, 3, v_extra, vl) | __riscv_vnmsac_vx_i32m2(vN, 3, v_extra, vl) | vint32m2_t v_extra = __riscv_vmv_v_x_i32m2(3, vl) | 1024 | m2 | 32 |
+
+vsadd.vv_e32m2 | __riscv_vsadd_vv_i32m2(v_res, v_step, vl)      | __riscv_vsadd_vv_i32m2(vN, v_step, vl)      |                                                    | 1024 | m2 | 32 |
+
+vmacc.vx_e32m2 | __riscv_vmacc_vx_i32m2(v_res, 3, v_extra, vl)  | __riscv_vmacc_vx_i32m2(vN, 3, v_extra, vl)  | vint32m2_t v_extra = __riscv_vmv_v_x_i32m2(3, vl) | 1024 | m2 | 32 |
+
+vsaddu.vx_e64m4 | __riscv_vsaddu_vx_u64m4(v_res, 5, vl)         | __riscv_vsaddu_vx_u64m4(vN, 5, vl)          |                                                    | 1024 | m4 | 64 | vuint64m4_t
+
+vfmul.vf_e32m2  | __riscv_vfmul_vf_f32m2(v_res, 1.5f, vl)       | __riscv_vfmul_vf_f32m2(vN, 1.5f, vl)        |                                                    | 1024 | m2 | 32 | vfloat32m2_t
+
+vadd.vv_e32m1  | __riscv_vadd_vv_i32m1(v_res, v_step, vl)       | __riscv_vadd_vv_i32m1(vN, v_step, vl)       |                                                    | 1024 | m1 | 32 |
+
+vsub.vv_e32m1  | __riscv_vsub_vv_i32m1(v_res, v_step, vl)       | __riscv_vsub_vv_i32m1(vN, v_step, vl)       |                                                    | 1024 | m1 | 32 |
+
+vmul.vx_e32m1  | __riscv_vmul_vx_i32m1(v_res, 3, vl)            | __riscv_vmul_vx_i32m1(vN, 3, vl)            |                                                    | 1024 | m1 | 32 |
+
+vsra.vx_e32m1  | __riscv_vsra_vx_i32m1(v_res, 15, vl)           | __riscv_vsra_vx_i32m1(vN, 15, vl)           |                                                    | 1024 | m1 | 32 |
+
+# vslideup.vx: сдвиг вектора вверх со вставкой из v_step, v_res здесь
+# и приёмник (нижние 3 элемента сохраняются), и часть источника цепочки
+vslideup.vx_e16m1 | __riscv_vslideup_vx_i16m1(v_res, v_step, 3, vl) | __riscv_vslideup_vx_i16m1(vN, v_step, 3, vl) |                                                 | 1024 | m1 | 16 |
+vslide1up.vx_e32m1 | __riscv_vslide1up_vx_i32m1(v_res, 3, vl) | __riscv_vslide1up_vx_i16m1(vN,  3, vl) |                                                 | 1024 | m1 | 16 |
+
+vadd.vv_e32m2  | __riscv_vadd_vv_i32m2(v_res, v_step, vl)       | __riscv_vadd_vv_i32m2(vN, v_step, vl)       |                                                    | 1024 | m2 | 32 |
+vsmul.vv_e16m2 | __riscv_vsmul_vv_i16m2(v_res, v_step, 0, vl)   | __riscv_vsmul_vv_i16m2(vN, v_step, 0, vl)   |                                                    | 1024 | m2 | 16 |
+
+vssub.vv_e16m2 | __riscv_vssub_vv_i16m2(v_res, v_step, vl)      | __riscv_vssub_vv_i16m2(vN, v_step, vl)      |                                                    | 1024 | m2 | 16 |
+
+vsadd.vv_e16m2 | __riscv_vsadd_vv_i16m2(v_res, v_step, vl)      | __riscv_vsadd_vv_i16m2(vN, v_step, vl)      |                                                    | 1024 | m2 | 16 |
+
+vmacc.vv_e16m1 | __riscv_vmacc_vv_i16m1(v_res, v_step, v_extra, vl) | __riscv_vmacc_vv_i16m1(vN, v_step, v_extra, vl) | vint16m1_t v_extra = __riscv_vmv_v_x_i16m1(3, vl) | 1024 | m1 | 16 |
+
+
+vsmul.vx_e16m1 | __riscv_vsmul_vx_i16m1(v_res, 3, 0, vl)        | __riscv_vsmul_vx_i16m1(vN, 3, 0, vl)        |                                                    | 1024 | m1 | 16 |
+
+vsub.vv_e16m1  | __riscv_vsub_vv_i16m1(v_res, v_step, vl)       | __riscv_vsub_vv_i16m1(vN, v_step, vl)       |                                                    | 1024 | m1 | 16 |
+
+vadd.vv_e16m1  | __riscv_vadd_vv_i16m1(v_res, v_step, vl)       | __riscv_vadd_vv_i16m1(vN, v_step, vl)       |                                                    | 1024 | m1 | 16 |
+
+
+vand.vx_e8m1 | __riscv_vand_vx_u8m1(v_res, 0x0F, vl) | __riscv_vand_vx_u8m1(vN, 0x0F, vl) | | 1024 | m1 | 8 | vuint8m1_t
+
+vor.vv_e8m1  | __riscv_vor_vv_u8m1(v_res, v_step, vl) | __riscv_vor_vv_u8m1(vN, v_step, vl) | | 1024 | m1 | 8 | vuint8m1_t
+
+vsll.vx_e8m1 | __riscv_vsll_vx_u8m1(v_res, 2, vl)     | __riscv_vsll_vx_u8m1(vN, 2, vl)     | | 1024 | m1 | 8 | vuint8m1_t
+
+vsrl.vx_e8m1 | __riscv_vsrl_vx_u8m1(v_res, 2, vl)     | __riscv_vsrl_vx_u8m1(vN, 2, vl)     | | 1024 | m1 | 8 | vuint8m1_t
+
+vmul.vx_e16m2 | __riscv_vmul_vx_i16m2(v_res, 3, vl)   | __riscv_vmul_vx_i16m2(vN, 3, vl)    | | 1024 | m2 | 16 |
